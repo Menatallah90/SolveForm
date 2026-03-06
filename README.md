@@ -162,13 +162,28 @@ SolveForm/
 ---
 
 ## Roadmap
-- [ ] Multi-floor stacked massing
-- [ ] Shading device optimization  
-- [ ] Structural efficiency objective
-- [ ] Visual canvas scorecard
+
+### v0.2 — Program + Floors
+- [ ] Multi-floor stacked massing with floor-to-floor height input
+- [ ] Min/max room area constraints
+- [ ] Program mix input (residential / office / retail ratios)
+
+### v0.3 — Adaptive Facades
+- [ ] Per-facade adaptive opening sizing based on solar angle
+- [ ] Angled fins/shading devices generated from sun path data
+- [ ] Opening variation by floor (solar altitude-driven)
+
+### v0.4 — Arbitrary Site Envelope
+- [ ] Input any closed Brep as site/zoning envelope
+- [ ] Optimizer constrains all candidates to fit within envelope
+- [ ] Works on irregular sites, sloped terrain, complex zoning volumes
+
+### v0.5 — Polish
+- [ ] Component icons
+- [ ] Visual canvas scorecard (GH-native rendering)
 - [ ] PDF performance report export
 - [ ] Yak package manager release
-
+- [ ] Food4Rhino submission
 ---
 
 ## Philosophy
