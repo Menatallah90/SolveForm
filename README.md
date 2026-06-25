@@ -1,225 +1,102 @@
-# SolveForm
-### Data-Driven Architectural Form Optimizer for Grasshopper / Rhino 8
+# SolveForm v0.2-beta
 
-SolveForm is a Grasshopper plugin that generates and ranks building massing 
-candidates optimized for environmental performance. It combines real climate 
-data (EPW files) with designer-defined constraints and a genetic algorithm to 
-propose forms shaped by data — not arbitrary aesthetic choices.
-
-> "The building's shape is an argument made by climate and site."
+A Grasshopper plugin for Rhino 8 that generates solar-optimized building massing with automatic facade articulation and window placement.
 
 ---
 
-## What It Does
+## Pipeline
 
-Most environmental plugins analyze a form you already designed.  
-SolveForm works the other way: **it generates the form from the data.**
-
-You provide:
-- Site dimensions and location
-- Hard constraints (max height, coverage ratio, WWR limits)
-- Objective weights (how much do you care about solar vs. wind?)
-- A real EPW weather file for your site
-
-SolveForm returns:
-- Ranked massing candidates (Box, L-Shape, Courtyard typologies)
-- Solar score per design (facade orientation × glazing × radiation)
-- Wind score per design (exposure + cross-ventilation potential)
-- A combined weighted score with full performance report
-
----
-
-## Sample Output (Riyadh, SAU — real EPW data)
 ```
-Rank 1 | Score: 82.7/100  [Courtyard]
-  Size:        26.2m W × 24.8m D × 15.3m H
-  Orientation: -4.5° from North
-  WWR South:   74%   North: 27%
-  ☀ Solar:     87.7/100
-  💨 Wind:      70.8/100
-  Constraints: ✅ All passed
-
-Rank 2 | Score: 81.0/100  [Box]
-  Size:        45.0m W × 12.0m D × 13.9m H
-  Orientation: 1.5° from North
-  WWR South:   75%   North: 28%
-  ☀ Solar:     88.6/100
-  💨 Wind:      63.3/100
-  Constraints: ✅ All passed
+Solar → Section → Unify → Normalize → Facades → Openings
+                        ↘
+                         Floors
 ```
 
-The optimizer discovered that a **Courtyard typology** outperforms a pure box 
-when both solar and wind objectives are weighted equally — independently 
-arriving at a form that creates sheltered outdoor space while maintaining 
-south facade exposure. The data made an architectural decision.
-
----
-
-## How It Works
-```
-EPW File ──→ EpwReader ──→ SiteData (solar + wind)
-Designer Inputs ──→ DesignConstraints
-                    ↓
-           FormGenerator
-     (Box / L-Shape / Courtyard)
-                    ↓
-        GeneticOptimizer
-  (Selection → Crossover → Mutation)
-  (20 generations × 30 candidates)
-                    ↓
-   SolarAnalyzer + WindAnalyzer
-                    ↓
-    Ranked Output → Geometry + Scorecard
-```
-
----
-
-## Components
-
-| Component | Tab | Description |
-|-----------|-----|-------------|
-| `EPW Loader` | SolveForm / Data | Parses .epw → solar radiation + wind data |
-| `SolveForm Solar` | SolveForm / Optimization | Main optimizer |
-| `SolveForm Dashboard` | SolveForm / Visualization | Text scorecard |
-
----
-
-## Inputs — SolveForm Solar
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `Lat` | 24.7 | Site latitude |
-| `Lon` | 46.7 | Site longitude |
-| `SW` | 50m | Site width E-W |
-| `SD` | 40m | Site depth N-S |
-| `N°` | 0 | True North offset |
-| `Hmax` | 24m | Max building height |
-| `Cov` | 0.6 | Max site coverage |
-| `N` | 30 | Population size |
-| `Top` | 3 | Results to return |
-| `Sol` | — | Monthly solar from EPW |
-| `Wsol` | 0.7 | Solar weight (0–1) |
-| `Wwnd` | 0.3 | Wind weight (0–1) |
-| `WDir` | -1 | Wind direction override |
-| `WDirD` | — | Monthly wind dirs from EPW |
-| `WSpdD` | — | Monthly wind speeds from EPW |
+| Component | Description |
+|---|---|
+| **Solar** | Reads EPW climate file, computes solar exposure by orientation |
+| **Section** | Generates stepped massing from a profile curve, solar-derived heights |
+| **Floors** | Derives floor slabs and Z levels from Section output |
+| **Unify** | Boolean-unions all zone masses into one closed polysurface |
+| **Normalize** | Corrects scrambled face normals from Boolean union |
+| **Facades** | Tags exterior faces by orientation (N/S/E/W), outputs face geometry |
+| **Openings** | Arrays windows across all exterior faces, one row per floor band |
 
 ---
 
 ## Installation
 
-### Requirements
-- Rhino 8
-- Grasshopper (included with Rhino 8)
-- .NET 7.0
-
-### Option A — Build from source
-1. Clone this repo
-2. Open `SolveForm.sln` in Visual Studio 2022
-3. Press F5 — builds and launches Rhino automatically
-4. Or: Build → copy `SolveForm.gha` from `bin/Debug/net7.0-windows/`
-5. Paste into `%AppData%\Grasshopper\Libraries\`
-6. Restart Rhino
-
-### Option B — Direct install
-1. Download `SolveForm.gha` from [Releases](../../releases)
-2. Copy to `%AppData%\Grasshopper\Libraries\`
-3. Restart Rhino → find components under **SolveForm** tab
+1. Build the solution in Visual Studio 2022 (`Release` config, targeting Rhino 8)
+2. Copy the compiled `.gha` file to your Grasshopper Libraries folder:
+   - Windows: `%AppData%\Grasshopper\Libraries`
+3. Unblock the `.gha` file (right-click → Properties → Unblock)
+4. Restart Rhino and Grasshopper
+5. SolveForm components appear under the **SolveForm** tab
 
 ---
 
-## Getting EPW Files
+## Wiring
 
-Download free EPW climate files for any location:
-- **[climate.onebuilding.org](https://climate.onebuilding.org)**
-- Search your city → download `.epw`
-- Wire file path into the `EPW Loader` component
+```
+EPW File         → Solar.EPW
+Solar.NorthAngle → Section.NorthAngle
+Solar.Heights    → Section.RequiredHeights
+
+Section.Massing     → Unify.Masses
+Section.ZoneHeights → Floors.ZoneHeights
+Section.Profiles    → Floors.Profiles
+
+Unify.Unified    → Normalize.Brep
+Normalize.Fixed  → Facades.Unified
+Normalize.Fixed  → Openings.UnifiedBrep
+
+Floors.ZLevels   → Openings.FloorHeights
+```
 
 ---
 
-## Project Structure
-```
-SolveForm/
-├── Components/
-│   ├── SolveFormComponent.cs      # Main GH component
-│   ├── EpwLoaderComponent.cs      # EPW parser GH component  
-│   └── DashboardComponent.cs      # Scorecard visualization
-├── Core/
-│   ├── SolarAnalyzer.cs           # Solar scoring engine
-│   ├── WindAnalyzer.cs            # Wind scoring engine
-│   ├── GeneticOptimizer.cs        # Evolutionary optimizer
-│   ├── FormGenerator.cs           # Box / L-Shape / Courtyard generator
-│   ├── ConstraintEvaluator.cs     # Hard constraint enforcement
-│   └── EpwReader.cs               # EPW climate file parser
-├── Models/
-│   ├── SiteData.cs                # Site + climate data
-│   ├── DesignCandidate.cs         # Massing candidate
-│   ├── DesignConstraints.cs       # Designer constraints
-│   └── PerformanceScore.cs        # Score results
-└── SolveFormInfo.cs               # Plugin metadata
-```
+## Openings Component Inputs
+
+| Input | Description | Default |
+|---|---|---|
+| UnifiedBrep | Mass brep from Normalize | — |
+| FloorHeights | Z levels from Floors | — |
+| WindowWidth | Width per window | 1.0 |
+| WindowHeight | Height per window | 2.4 |
+| WindowSpacing | Center-to-center spacing | 1.8 |
+| SillHeight | Floor to window bottom | 0.9 |
+
+---
+
+## Known Limitations (v0.2)
+
+- **Stepping artifact:** Section generates zones with up to 20% N-offset per level. Floor band Z levels occasionally misalign with step geometry, causing top-floor windows to appear slightly tall or offset. Fix scheduled for v0.3.
+- **No solar-driven WWR:** Openings places equal windows on all orientations. Solar optimization of window-to-wall ratio by facade orientation is Step 2, scheduled as a separate `SolveFormSolarOpenings` component in v0.3.
+- **No wall thickness / boolean cut:** CutOpenings component is in development. For renders, use the flat window rectangles from Openings as surface cutters manually in Rhino.
+- **Section massing:** Profile extrusion logic is a placeholder. Genuine setback/cruciform footprint tapering is v0.3+.
 
 ---
 
 ## Roadmap
 
-### v0.2 Program + Floors
-- [ ] Multi-floor stacked massing with floor-to-floor height input
-- [ ] Min/max room area constraints
-- [ ] Program mix input (residential / office / retail ratios)
-
-### v0.3 Adaptive Facades
-- [ ] Per-facade adaptive opening sizing based on solar angle
-- [ ] Angled fins/shading devices generated from sun path data
-- [ ] Opening variation by floor (solar altitude-driven)
-
-### v0.4 Arbitrary Site Envelope
-- [ ] Input any closed Brep as site/zoning envelope
-- [ ] Optimizer constrains all candidates to fit within envelope
-- [ ] Works on irregular sites, sloped terrain, complex zoning volumes
-
-### v0.5 Polish
-- [ ] Component icons
-- [ ] Visual canvas scorecard (GH-native rendering)
-- [ ] PDF performance report export
-- [ ] Yak package manager release
-- [ ] Food4Rhino submission
----
-
-## Philosophy
-
-SolveForm is built on one argument:  
-**Form should follow data, not just function.**
-
-The difference between SolveForm and existing tools (Ladybug, Honeybee, 
-Octopus, Galapagos) is that those tools analyze or optimize a form you 
-already invented. SolveForm invents the form from environmental constraints.
-
-This is closer to how **Frei Otto** worked — form-finding through physical 
-forces — than how most parametric architects work (form-first, analysis-second).
+| Version | Features |
+|---|---|
+| v0.1 | EPW reader, solar/wind analysis, genetic optimizer, 3 typologies |
+| v0.2 | Normalize, Facades, Openings — full facade articulation pipeline |
+| v0.3 | Solar-driven WWR, Section massing redesign, CutOpenings boolean |
+| v0.4 | Arbitrary Brep site envelope input |
+| v0.5 | Food4Rhino submission, UI polish |
 
 ---
 
-## Built With
-- Rhino 8 + Grasshopper + RhinoCommon
-- C# / .NET 7.0
-- EPW weather data format by EnergyPlus
+## Requirements
 
-## License
-MIT — free to use, modify, distribute.
-```
+- Rhino 8
+- Grasshopper (built-in)
+- Visual Studio 2022 (.NET Framework 4.8)
 
 ---
 
-### Step 4 — Release the .gha
-1. GitHub → **Releases → Create a new release**
-2. Tag: `v0.1-beta`
-3. Title: `SolveForm v0.1-beta`
-4. Description:
-```
-First public beta.
-- Solar + wind multi-objective optimization
-- Real EPW climate data support
-- Genetic algorithm (20 gen × 30 candidates)
-- Box, L-Shape, Courtyard typologies
-- Tested on Riyadh EPW — courtyard typology emerged as optimal form
+## Author
+
+Menatallah Abdulrhman — github.com/Menatallah90
