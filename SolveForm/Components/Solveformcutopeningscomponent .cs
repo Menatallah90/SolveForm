@@ -1,4 +1,22 @@
-﻿using System;
+﻿// SolveFormCutOpeningsComponent.cs
+// GUID: D5F8A312-6B94-4E23-9C74-2A0F3B158D77
+//
+// UNCHANGED LOGIC THIS SESSION -- the real fix for the 0/515 "boolean
+// null/empty" failure lives in HorizontalOpeningStripsComponent.cs
+// (CutterOvershoot). Cutters and this shell's outer face were built from
+// the exact same coincident surface with zero gap -- classic Rhino boolean
+// failure mode, fails silently and uniformly for every cutter, which is
+// exactly what you saw. Overshoot fixes it at the source.
+//
+// ADDED THIS SESSION -- shell diagnostics. If cuts still fail after the
+// overshoot fix, the Report below will now tell us WHY instead of us
+// guessing again: shell IsValid/IsSolid state and a naked-edge count. A
+// non-zero naked edge count means the panel union did not produce a
+// watertight shell -- gaps at slice-to-slice or step edges where the
+// per-face offset panels didn't quite meet -- which would explain boolean
+// failures independently of the overshoot fix.
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Grasshopper.Kernel;
@@ -10,31 +28,21 @@ namespace SolveForm.Components
     {
         public SolveFormCutOpeningsComponent()
             : base("SolveForm Cut Openings", "SF_Cut",
-                   "Creates hollow shell with wall thickness, then cuts window openings.",
+                   "Builds shell from per-face thickened panels (robust on stepped geometry), cuts window openings one at a time.",
                    "SolveForm", "Facade")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddBrepParameter("UnifiedBrep", "B",
-                "Closed mass brep from Normalize or Unify",
-                GH_ParamAccess.item);
-            pManager.AddBrepParameter("Openings", "O",
-                "Window rectangle breps from SolveForm Openings",
-                GH_ParamAccess.list);
-            pManager.AddNumberParameter("WallThickness", "T",
-                "Wall thickness in model units. Default 0.3.",
-                GH_ParamAccess.item, 0.3);
+            pManager.AddBrepParameter("UnifiedBrep", "B", "Closed mass brep from Unify", GH_ParamAccess.item);
+            pManager.AddBrepParameter("Openings", "O", "Solid window openings (WindowSolids from Opening Strips)", GH_ParamAccess.list);
+            pManager.AddNumberParameter("WallThickness", "T", "Wall thickness in model units. Default 0.3.", GH_ParamAccess.item, 0.3);
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
-            pManager.AddBrepParameter("PunchedMass", "P",
-                "Hollow mass with window openings",
-                GH_ParamAccess.item);
-            pManager.AddTextParameter("Report", "R",
-                "Diagnostic report",
-                GH_ParamAccess.item);
+            pManager.AddBrepParameter("PunchedMass", "P", "Hollow mass with window openings", GH_ParamAccess.item);
+            pManager.AddTextParameter("Report", "R", "Diagnostic report", GH_ParamAccess.item);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -48,151 +56,188 @@ namespace SolveForm.Components
             DA.GetData(2, ref wallT);
             if (wallT < 0.05) wallT = 0.05;
 
+            double tol = Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001;
+
             var report = new System.Text.StringBuilder();
             report.AppendLine("══ CUT OPENINGS REPORT ══");
-            report.AppendLine($"  {openings.Count} windows | WallThickness={wallT}");
+            report.AppendLine($"  {openings.Count} window solids | WallThickness={wallT}");
 
-            // ── Step 1: Make hollow shell ───────────────────────────────────
-            // Scale the mass inward from its bbox center to approximate inner void.
-            // Scale factor = (dim - 2*wallT) / dim for each axis.
-            BoundingBox bb = mass.GetBoundingBox(false);
-            double sizeX = bb.Max.X - bb.Min.X;
-            double sizeY = bb.Max.Y - bb.Min.Y;
-            double sizeZ = bb.Max.Z - bb.Min.Z;
-
-            // Scale factors per axis
-            double sx = Math.Max(0.1, (sizeX - 2 * wallT) / sizeX);
-            double sy = Math.Max(0.1, (sizeY - 2 * wallT) / sizeY);
-            double sz = Math.Max(0.1, (sizeZ - 2 * wallT) / sizeZ);
-
-            Brep innerVoid = mass.DuplicateBrep();
-            // Scale non-uniformly from bbox center
-            Point3d bbCen = bb.Center;
-            Transform scale = Transform.Scale(
-                new Plane(bbCen, Vector3d.XAxis, Vector3d.YAxis),
-                sx, sy, sz);
-            innerVoid.Transform(scale);
-
-            // Boolean difference: outer minus inner = hollow shell
-            Brep shell;
-            Brep[] shellResult = Brep.CreateBooleanDifference(
-                new[] { mass.DuplicateBrep() }, new[] { innerVoid }, 0.001);
-
-            if (shellResult != null && shellResult.Length > 0)
-            {
-                shell = shellResult.OrderByDescending(b => {
-                    var v = VolumeMassProperties.Compute(b);
-                    return v != null ? v.Volume : 0;
-                }).First();
-                report.AppendLine("  Shell: hollow OK");
-            }
-            else
-            {
-                // Scale failed — try offset
-                Brep[] offsetResult = Brep.CreateOffsetBrep(
-                    mass, -wallT, true, true, 0.001, out _, out _);
-                if (offsetResult != null && offsetResult.Length > 0)
-                {
-                    Brep innerO = offsetResult.OrderByDescending(b => {
-                        var v = VolumeMassProperties.Compute(b);
-                        return v != null ? v.Volume : 0;
-                    }).First();
-                    Brep[] shellO = Brep.CreateBooleanDifference(
-                        new[] { mass.DuplicateBrep() }, new[] { innerO }, 0.001);
-                    shell = (shellO != null && shellO.Length > 0) ? shellO[0] : mass.DuplicateBrep();
-                    report.AppendLine(shell == mass ? "  Shell: both methods failed — solid mass" : "  Shell: offset method OK");
-                }
-                else
-                {
-                    shell = mass.DuplicateBrep();
-                    report.AppendLine("  Shell: FAILED — using solid mass");
-                }
-            }
-
-            // ── Step 2: Build cutters ───────────────────────────────────────
+            // ── Step 1: build shell from thickened per-face panels ──────────
             var vmp = VolumeMassProperties.Compute(mass);
-            Point3d massCen = vmp != null ? vmp.Centroid : bbCen;
-            double cutDepth = wallT * 2 + 0.5;
+            Point3d volumeCentroid = (vmp != null) ? vmp.Centroid : mass.GetBoundingBox(false).Center;
 
-            var cutters = new List<Brep>();
-            int skipped = 0;
+            var panels = new List<Brep>();
+            int panelFail = 0, panelFlip = 0;
 
-            foreach (Brep win in openings)
+            foreach (BrepFace face in mass.Faces)
             {
-                if (win == null || win.Faces.Count == 0) { skipped++; continue; }
+                double uMid = face.Domain(0).Mid, vMid = face.Domain(1).Mid;
+                var amp = AreaMassProperties.Compute(face.DuplicateFace(false));
+                if (amp == null) { panelFail++; continue; }
+                Point3d faceCentroid = amp.Centroid;
+                double faceDistToCenter = (faceCentroid - volumeCentroid).Length;
 
-                var wAmp = AreaMassProperties.Compute(win);
-                if (wAmp == null) { skipped++; continue; }
-                Point3d wCen = wAmp.Centroid;
+                Brep panel = Brep.CreateFromOffsetFace(face, -wallT, tol, false, true);
+                if (panel != null && panel.IsValid)
+                {
+                    var pvmp = VolumeMassProperties.Compute(panel);
+                    if (pvmp != null)
+                    {
+                        double panelDistToCenter = (pvmp.Centroid - volumeCentroid).Length;
+                        if (panelDistToCenter >= faceDistToCenter)
+                        {
+                            Brep flipped = Brep.CreateFromOffsetFace(face, wallT, tol, false, true);
+                            if (flipped != null && flipped.IsValid) { panel = flipped; panelFlip++; }
+                        }
+                    }
+                }
 
-                Vector3d inward = massCen - wCen;
-                inward.Z = 0;
-                if (!inward.Unitize()) { skipped++; continue; }
-                Vector3d outward = -inward;
-
-                // Get window boundary
-                var edges = win.DuplicateEdgeCurves();
-                var joined = Curve.JoinCurves(edges, 0.01);
-                if (joined == null || joined.Length == 0) { skipped++; continue; }
-                Curve boundary = joined.OrderByDescending(c => c.GetLength()).First();
-
-                // Shift boundary outward so cutter starts outside mass surface
-                boundary.Transform(Transform.Translation(outward * (wallT + 0.1)));
-                Curve boundary2 = boundary.DuplicateCurve();
-                boundary2.Transform(Transform.Translation(inward * cutDepth));
-
-                // Loft start and end boundary = cutter box
-                Brep[] lofted = Brep.CreateFromLoft(
-                    new[] { boundary, boundary2 },
-                    Point3d.Unset, Point3d.Unset,
-                    LoftType.Straight, false);
-
-                if (lofted == null || lofted.Length == 0) { skipped++; continue; }
-
-                Brep cutter = lofted[0];
-                cutter = cutter.CapPlanarHoles(0.001) ?? cutter;
-                if (!cutter.IsSolid)
-                    cutter = cutter.CapPlanarHoles(0.001) ?? cutter;
-
-                cutters.Add(cutter);
+                if (panel == null || !panel.IsValid) { panelFail++; continue; }
+                panels.Add(panel);
             }
 
-            report.AppendLine($"  Built {cutters.Count} cutters | {skipped} skipped");
+            report.AppendLine($"  Panels built: {panels.Count}/{mass.Faces.Count} | flipped: {panelFlip} | failed: {panelFail}");
 
-            if (cutters.Count == 0)
+            if (panels.Count == 0)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "No cutters built.");
-                DA.SetData(0, shell);
+                report.AppendLine("  FATAL: no shell panels built. Aborting.");
+                DA.SetData(0, mass);
                 DA.SetData(1, report.ToString());
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "No shell panels could be built.");
                 return;
             }
 
-            // ── Step 3: One boolean difference — shell minus all cutters ────
-            Brep[] final = Brep.CreateBooleanDifference(
-                new[] { shell }, cutters, 0.001);
+            Brep shell = null;
+            Brep[] unionResult = null;
+            try { unionResult = Brep.CreateBooleanUnion(panels, tol * 5); }
+            catch (Exception ex) { report.AppendLine($"  Panel union threw: {ex.Message}"); }
 
-            if (final != null && final.Length > 0)
+            if (unionResult != null && unionResult.Length > 0)
             {
-                Brep best = final.OrderByDescending(b => {
+                shell = unionResult.OrderByDescending(b => {
                     var v = VolumeMassProperties.Compute(b);
-                    return v != null ? v.Volume : 0;
+                    return v != null ? Math.Abs(v.Volume) : 0;
                 }).First();
-                report.AppendLine($"  Windows cut: success ({final.Length} result brep(s))");
-                report.AppendLine("══ DONE ══");
-                DA.SetData(0, best);
+                report.AppendLine($"  Shell: batch union OK ({unionResult.Length} fragment(s), kept largest)");
             }
             else
             {
-                report.AppendLine("  Windows cut: FAILED — outputting hollow shell without cuts");
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Window boolean failed. Outputting hollow shell.");
-                DA.SetData(0, shell);
+                report.AppendLine("  Batch union failed -- trying sequential pairwise union.");
+                Brep current = panels[0];
+                int mergedCount = 1;
+                for (int i = 1; i < panels.Count; i++)
+                {
+                    Brep[] step = null;
+                    try { step = Brep.CreateBooleanUnion(new List<Brep> { current, panels[i] }, tol * 5); }
+                    catch { }
+                    if (step != null && step.Length > 0)
+                    {
+                        current = step.OrderByDescending(b => {
+                            var v = VolumeMassProperties.Compute(b);
+                            return v != null ? Math.Abs(v.Volume) : 0;
+                        }).First();
+                        mergedCount++;
+                    }
+                }
+                shell = current;
+                report.AppendLine($"  Shell: pairwise union merged {mergedCount}/{panels.Count} panels");
             }
 
+            if (shell != null && !shell.IsValid) shell.Repair(tol);
+
+            // ── NEW: shell health diagnostics ────────────────────────────
+            // If cuts still fail after the overshoot fix in Opening Strips,
+            // this tells us whether the shell itself is the problem (not
+            // watertight) rather than the cutter/wall coincidence issue.
+            if (shell != null)
+            {
+                Curve[] nakedEdges = shell.DuplicateNakedEdgeCurves(true, true);
+                int nakedCount = nakedEdges != null ? nakedEdges.Length : 0;
+                var shellVmp = VolumeMassProperties.Compute(shell);
+                double shellVol = shellVmp != null ? Math.Abs(shellVmp.Volume) : 0;
+                report.AppendLine($"  Shell health: IsValid={shell.IsValid} | IsSolid={shell.IsSolid} | NakedEdgeLoops={nakedCount} | Volume={shellVol:F2}");
+                if (!shell.IsSolid || nakedCount > 0)
+                    report.AppendLine("  WARNING: shell is not watertight. Cuts are likely to fail regardless of cutter geometry. " +
+                                       "This means the per-face panel union is leaving gaps, most likely at step/tilt edges where " +
+                                       "adjacent panels don't meet exactly -- a separate problem from the cutter overshoot fix.");
+            }
+            else
+            {
+                report.AppendLine("  Shell health: shell is NULL after union attempts.");
+            }
+
+            // ── Step 2: cut windows one at a time, tolerance retry ladder ────
+            Brep resultBrep = shell;
+            int cutOK = 0, cutFailedNull = 0, cutFailedSanity = 0, cutFailedInvalid = 0;
+            var failLog = new List<string>();
+            double[] tolLadder = { tol, tol * 5, tol * 20 };
+
+            for (int i = 0; i < openings.Count; i++)
+            {
+                Brep cutter = openings[i];
+                if (cutter == null || !cutter.IsValid)
+                {
+                    if (cutter != null) cutter.Repair(tol);
+                    if (cutter == null || !cutter.IsValid) { cutFailedInvalid++; failLog.Add($"[{i}] invalid cutter"); continue; }
+                }
+
+                bool succeeded = false;
+                string lastFailReason = "";
+
+                foreach (double t in tolLadder)
+                {
+                    Brep[] step = null;
+                    try { step = Brep.CreateBooleanDifference(new[] { resultBrep }, new[] { cutter.DuplicateBrep() }, t); }
+                    catch (Exception ex) { lastFailReason = $"threw: {ex.Message}"; continue; }
+
+                    if (step == null || step.Length == 0) { lastFailReason = "boolean null/empty"; continue; }
+
+                    Brep candidate = step.OrderByDescending(b => {
+                        var v = VolumeMassProperties.Compute(b);
+                        return v != null ? Math.Abs(v.Volume) : 0;
+                    }).First();
+
+                    var curVol = VolumeMassProperties.Compute(resultBrep);
+                    var newVol = VolumeMassProperties.Compute(candidate);
+                    double cv = curVol != null ? Math.Abs(curVol.Volume) : 0;
+                    double nv = newVol != null ? Math.Abs(newVol.Volume) : 0;
+
+                    if (nv > cv * 0.5)
+                    {
+                        resultBrep = candidate;
+                        cutOK++; succeeded = true;
+                        break;
+                    }
+                    else lastFailReason = $"sanity-rejected (result vol {nv:F2} vs current {cv:F2})";
+                }
+
+                if (!succeeded)
+                {
+                    if (lastFailReason.StartsWith("sanity")) cutFailedSanity++;
+                    else cutFailedNull++;
+                    failLog.Add($"[{i}] {lastFailReason}");
+                }
+            }
+
+            report.AppendLine($"  Cuts: {cutOK} OK | {cutFailedNull} boolean-null | {cutFailedSanity} sanity-rejected | {cutFailedInvalid} invalid-cutter");
+            if (failLog.Count > 0)
+            {
+                report.AppendLine("  First failures:");
+                foreach (var l in failLog.Take(10)) report.AppendLine("    " + l);
+                if (failLog.Count > 10) report.AppendLine($"    ... {failLog.Count - 10} more");
+            }
+
+            if (cutOK == 0)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "All window cuts failed -- see Report.");
+            else if (cutFailedNull + cutFailedSanity + cutFailedInvalid > 0)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, $"{cutOK}/{openings.Count} windows cut -- see Report.");
+
+            report.AppendLine("══ DONE ══");
+            DA.SetData(0, resultBrep);
             DA.SetData(1, report.ToString());
         }
 
         protected override System.Drawing.Bitmap Icon => null;
-        public override Guid ComponentGuid =>
-            new Guid("D5F8A312-6B94-4E23-9C74-2A0F3B158D77");
+        public override Guid ComponentGuid => new Guid("D5F8A312-6B94-4E23-9C74-2A0F3B158D77");
     }
 }
