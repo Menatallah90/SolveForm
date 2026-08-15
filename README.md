@@ -4,7 +4,7 @@ A Grasshopper plugin for Rhino 8 that generates and evaluates solar-responsive b
 
 Built in C#, developed as an independent research and portfolio project alongside 3D-printed concrete facade research.
 
-![Hero render](screenshots/hero_render.png)
+![Hero render](screenshots/Perspective.png)
 
 ## What it does
 
