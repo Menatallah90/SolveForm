@@ -38,7 +38,7 @@ Context Generator
 
 | Site footprint | Massing | Openings | Final |
 |---|---|---|---|
-| ![Site footprint](screenshots/PROFILE.png_) | ![Massing](screenshots/MASS_ADJUSTED.png) | ![Openings](screenshots/OPENINGS.png) | ![Hero render](screenshots/Perspective.png) |
+| ![Site footprint](screenshots/PROFILE.png) | ![Massing](screenshots/MASS_ADJUSTED.png) | ![Openings](screenshots/OPENINGS.png) | ![Hero render](screenshots/Perspective.png) |
 
 The site footprint is generated within a jittered synthetic context, then extruded and stepped per floor based on wind-driven boundary-layer physics. Facade openings are windowed onto the resulting envelope — straight wall runs get consistent, evenly spaced windows; the notch and setback edges are handled as continuous geometry rather than subdivided.
 
